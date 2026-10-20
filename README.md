@@ -21,7 +21,7 @@ Designed and developed by **Abduallah Al Raju**, this framework serves as both a
 
 ---
 
-## Live Verification
+## Live Verification Captures
 
 The transmission protocol was verified over local loopback using a key-derived polyalphabetic session. Full telemetry and step-by-step logs are documented in the [Verification Report](VERIFICATION_REPORT.md).
 
@@ -30,6 +30,27 @@ The transmission protocol was verified over local loopback using a key-derived p
 
 ### Receiver Console (listen.py)
 ![HushTalk Receiver Console](hushtalk-listener.png)
+
+---
+
+## Tactical Web Chat & Detection Dashboard
+
+WhyNot-HushTalk includes a built-in, local tactical web system providing full-duplex bidirectional covert timing chat paired with an interactive SOC defense inspector:
+
+```bash
+python3 hushtalk.py web --port 8080 --host 127.0.0.1
+```
+
+Access the dashboard at `http://127.0.0.1:8080` in any web browser.
+
+### Web System Features
+
+- **Full-Duplex Dual-Role Node**: Sends and receives messages concurrently via background asynchronous worker threads. Includes loopback echo cancellation so local tests do not feed back into the receiver FSM.
+- **Message Lifecycle Tracking**: Monitors transmissions in real-time (`QUEUED` -> `TRANSMITTING` -> `DELIVERED` -> `ACKNOWLEDGED`) with live character modulation progress bars.
+- **Live Inter-Arrival Time (IAT) Histogram**: Canvas-based real-time delay distribution chart visualizing discrete clustering against baseline network jitter.
+- **Stealth Index Gauge**: Displays live Coefficient of Variation ($CoV = \sigma / \mu$) to assess timing channel detectability.
+- **Raw Packet Stream Ticker**: Terminal feed reporting every outgoing and incoming packet with sequence number, IP destination, protocol, and measured $\Delta t$.
+- **Zero-Dependency Architecture**: Embedded CSS, Vanilla JS, and WebSockets operating completely offline in air-gapped environments.
 
 ---
 
@@ -133,6 +154,7 @@ Packets are indexed with strictly monotonically increasing sequence numbers:
 
 ## Core Capabilities
 
+- **Local Web Chat System**: Real-time browser-based dashboard running on FastAPI and WebSockets with full-duplex message transmission.
 - **Multi-Transport Layer**: Supports standard raw ICMP Echo Requests (`--transport icmp`) for realistic ping covert channel operations, and unprivileged userland UDP probe modulation (`--transport udp`) for testing without root or administrative privileges.
 - **IDS Signature Defeat**: Standard ping tools use characteristic payload byte structures. WhyNot-HushTalk can format its payload to match legitimate host implementations:
   - `windows`: Replicates the 32-byte alphabetical sequence of Windows `ping.exe`.
@@ -153,7 +175,7 @@ Packets are indexed with strictly monotonically increasing sequence numbers:
 - Python 3.9 or higher
 - Linux, macOS, or Windows
 - **Administrative Privileges**: Raw socket capture (ICMP) requires `sudo` / `root` on Linux/macOS or [Npcap](https://npcap.com/) on Windows.
-- **Unprivileged Alternative**: When operating in restricted containers or non-root shells, use `--transport udp` or `--simulate`.
+- **Unprivileged Alternative**: When operating in restricted containers or non-root shells, use `--transport udp`, the web chat interface, or `--simulate`.
 
 ### Installation Steps
 
@@ -173,7 +195,17 @@ pip install -e .
 
 ## Usage Guide
 
-### 1. In-Memory Simulation (No Root Required)
+### 1. Launching the Tactical Web Chat
+
+Start the local web dashboard:
+
+```bash
+python3 hushtalk.py web --port 8080 --host 127.0.0.1
+```
+
+Open `http://127.0.0.1:8080` in your web browser. From the interface, configure peers, select timing profiles, view real-time IAT distribution graphs, and chat covertly.
+
+### 2. In-Memory Simulation (No Root Required)
 
 Verify protocol encoding and decoding directly in your console:
 
@@ -187,7 +219,7 @@ Or execute via the sender CLI:
 python3 whisper.py --simulate -m "SECURE COMM" --key "alpha-charlie" --profile fast
 ```
 
-### 2. Live Unprivileged UDP Mode
+### 3. Live Unprivileged UDP Mode
 
 Run sender and receiver in separate terminal sessions without root permissions:
 
@@ -201,7 +233,7 @@ python3 listen.py --transport udp --port 9999 --profile fast --key "SECRET_KEY" 
 python3 whisper.py --to 127.0.0.1 --transport udp --port 9999 --profile fast --key "SECRET_KEY" -m "SYSTEM OK" --wait-ack 10
 ```
 
-### 3. Live ICMP Ping Mode (Requires Root)
+### 4. Live ICMP Ping Mode (Requires Root)
 
 **Terminal 1 (Listener):**
 ```bash
@@ -215,11 +247,26 @@ sudo python3 whisper.py --to 192.168.1.100 --key "ENTERPRISE_KEY" --profile stan
 
 ---
 
+## REST API and WebSocket Reference
+
+When the web system is active (`hushtalk.py web`), the following endpoints are available:
+
+- `GET /api/status`: Returns node lifecycle status, active profile, ICMP ID, and live timing telemetry.
+- `POST /api/config`: Modifies peer IP, port, transport, key, and profile dynamically.
+- `GET /api/messages`: Returns message conversation history.
+- `POST /api/messages`: Enqueues an outbound message for timing modulation.
+- `GET /api/telemetry`: Returns raw packet log ring buffers and inter-arrival time distributions.
+- `POST /api/demo`: Executes an in-memory simulation exchange.
+- `WS /ws`: Real-time WebSocket connection for bidirectional event multiplexing.
+
+---
+
 ## Command-Line Interface Reference
 
 ### Unified Runner (`hushtalk.py`)
 
 ```bash
+python3 hushtalk.py web [--host HOST] [--port PORT]
 python3 hushtalk.py info [--key KEY] [--profile {standard,fast,stealth}]
 python3 hushtalk.py benchmark [--profile {standard,fast,stealth}]
 python3 hushtalk.py demo -m "TEXT" [--profile {standard,fast,stealth}] [--key KEY]
@@ -298,7 +345,7 @@ Sustained machine-precise ping sequences from non-monitoring endpoints indicate 
 
 ## Automated Testing & CI
 
-The test suite validates the framing state machine, cryptographic key derivations, interval snapping margins, synthetic jitter tolerance, and packet construction:
+The test suite validates the framing state machine, cryptographic key derivations, interval snapping margins, synthetic jitter tolerance, full-duplex node queues, and FastAPI endpoints:
 
 ```bash
 pytest -v tests/
@@ -311,6 +358,37 @@ python3 hushtalk.py benchmark --profile fast
 ```
 
 GitHub Actions workflows run automated tests across Ubuntu, Windows, and macOS runtimes for Python versions 3.9 through 3.14.
+
+---
+
+## Repository Structure
+
+```
+WhyNot-HushTalk/
+├── hushtalk_core.py       # Core protocol FSM, timing profiles, crypto derivation, simulation
+├── hushtalk_node.py       # Full-duplex node engine (async queue, listener, telemetry bus)
+├── web_app.py             # FastAPI backend with REST API and WebSocket streaming
+├── hushtalk.py            # Unified CLI suite (web, info, demo, benchmark, whisper, listen)
+├── whisper.py             # Sender CLI (Scapy ICMP & unprivileged UDP)
+├── listen.py              # Receiver CLI (Scapy packet sniffer & UDP)
+├── web/
+│   ├── index.html         # Tactical web chat dashboard and SOC inspector UI
+│   ├── style.css          # Dark-mode high-contrast terminal styling
+│   └── app.js             # WebSocket client, canvas IAT histogram, message controller
+├── VERIFICATION_REPORT.md # Live loopback transmission & verification report
+├── sender.png             # Sender console screenshot
+├── hushtalk-listener.png  # Receiver console screenshot
+├── codebooks/
+│   └── codebook.json      # Standard delay lookup table
+├── tests/
+│   ├── test_protocol.py   # Protocol simulation and loss resync tests
+│   ├── test_upgrades.py   # Timing profiles, payloads, IPv6, telemetry tests
+│   └── test_web_and_node.py # Full-duplex node and FastAPI API tests
+├── pyproject.toml         # PEP 621 packaging and project metadata
+├── requirements.txt       # Runtime dependencies (scapy, colorama, fastapi, uvicorn)
+└── .github/workflows/
+    └── ci.yml             # Multi-OS automated testing matrix
+```
 
 ---
 

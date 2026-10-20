@@ -16,8 +16,9 @@ init(autoreset=True)
 
 def cmd_info(args):
     print(f"{Fore.CYAN}{Style.BRIGHT}{'=' * 60}")
-    print(f"{Fore.CYAN}{Style.BRIGHT}  🔇 WhyNot-HushTalk Covert Channel Suite")
+    print(f"{Fore.CYAN}{Style.BRIGHT}  WhyNot-HushTalk Covert Channel Suite")
     print(f"{Fore.CYAN}{Style.BRIGHT}{'=' * 60}\n")
+    print(f"{Fore.YELLOW}Author: Abduallah Al Raju\n")
     print(f"{Fore.YELLOW}Supported Alphabet ({len(hc.ALPHABET)} symbols):")
     print(f"  {hc.ALPHABET}\n")
     print(f"{Fore.YELLOW}Default Marker Sequences & IDs:")
@@ -29,7 +30,7 @@ def cmd_info(args):
 
     print(f"{Fore.YELLOW}Timing Profiles:")
     for name, p in hc.PROFILES.items():
-        print(f"  • {Fore.GREEN}{name:<10}{Fore.RESET} base={p.base}ms step={p.step}ms margin=±{p.margin}ms jitter=±{p.default_jitter}ms")
+        print(f"  * {Fore.GREEN}{name:<10}{Fore.RESET} base={p.base}ms step={p.step}ms margin=+/-{p.margin}ms jitter=+/-{p.default_jitter}ms")
         print(f"    {Style.DIM}{p.description}{Style.RESET_ALL}")
     print()
 
@@ -56,7 +57,7 @@ def cmd_demo(args):
 
 
 def cmd_benchmark(args):
-    print(f"{Fore.CYAN}{Style.BRIGHT}[⚡] Running HushTalk Timing & Noise Tolerance Benchmark...")
+    print(f"{Fore.CYAN}{Style.BRIGHT}[*] Running HushTalk Timing & Noise Tolerance Benchmark...")
     print(f"    Testing profile '{args.profile}' across various jitter and loss conditions\n")
 
     test_messages = [
@@ -83,25 +84,43 @@ def cmd_benchmark(args):
             color = Fore.GREEN if uncertain == 0 else Fore.YELLOW
             cps_str = f"{stats.get('cps', 0.0):.2f} c/s"
             disp_msg = (msg[:25] + "..") if len(msg) > 27 else msg
-            print(f"{disp_msg:<28} | ±{j:>4.1f}ms  | {color}{status:<10}{Fore.RESET} | {clean_pct:<10} | {cps_str:<12}")
+            print(f"{disp_msg:<28} | +/-{j:>4.1f}ms  | {color}{status:<10}{Fore.RESET} | {clean_pct:<10} | {cps_str:<12}")
 
-    print(f"\n{Fore.GREEN}[✓] Benchmark complete.\n")
+    print(f"\n{Fore.GREEN}[+] Benchmark complete.\n")
+
+
+def cmd_web(args):
+    try:
+        import uvicorn
+    except ImportError:
+        print(f"{Fore.RED}[!] uvicorn is required for the web interface: pip install uvicorn fastapi")
+        sys.exit(1)
+
+    print(f"{Fore.CYAN}{Style.BRIGHT}[+] Starting WhyNot-HushTalk Web Chat System on http://{args.host}:{args.port}")
+    uvicorn.run("web_app:app", host=args.host, port=args.port, log_level="info")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="WhyNot-HushTalk: Network ping timing-channel covert communication suite",
+        description="WhyNot-HushTalk: Network ping timing-channel covert communication suite by Abduallah Al Raju",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="subcommand", help="command to run")
 
+    # web subparser
+    sp_web = subparsers.add_parser("web", help="Launch the local tactical web chat dashboard")
+    sp_web.add_argument("--host", default="127.0.0.1", help="host address to bind (default: 127.0.0.1)")
+    sp_web.add_argument("--port", type=int, default=8080, help="port to listen on (default: 8080)")
+
     # whisper subparser
-    sp_whisper = subparsers.add_parser("whisper", help="Send a covert message via ICMP timing delays")
+    sp_whisper = subparsers.add_parser("whisper", help="Send a covert message via ICMP/UDP timing delays")
     sp_whisper.add_argument("--to", default=None, help="target IPv4/IPv6 address")
     grp_w = sp_whisper.add_mutually_exclusive_group(required=True)
     grp_w.add_argument("-m", "--message", help="message text")
     grp_w.add_argument("--file", help="read message from file")
     sp_whisper.add_argument("--profile", choices=list(hc.PROFILES.keys()), default="standard")
+    sp_whisper.add_argument("--transport", choices=["icmp", "udp"], default="icmp")
+    sp_whisper.add_argument("--port", type=int, default=9999)
     sp_whisper.add_argument("--key", default=None, help="shared secret key")
     sp_whisper.add_argument("--payload", choices=["pattern", "windows", "linux", "random", "zero"], default="pattern")
     sp_whisper.add_argument("--payload-len", type=int, default=48)
@@ -116,9 +135,11 @@ def main():
     sp_whisper.add_argument("-v", "--verbose", action="store_true")
 
     # listen subparser
-    sp_listen = subparsers.add_parser("listen", help="Listen for and decode ICMP timing delays")
+    sp_listen = subparsers.add_parser("listen", help="Listen for and decode ICMP/UDP timing delays")
     sp_listen.add_argument("--iface", default=None)
     sp_listen.add_argument("--src", default=None)
+    sp_listen.add_argument("--transport", choices=["icmp", "udp"], default="icmp")
+    sp_listen.add_argument("--port", type=int, default=9999)
     sp_listen.add_argument("--profile", choices=list(hc.PROFILES.keys()), default="standard")
     sp_listen.add_argument("--key", default=None)
     sp_listen.add_argument("--margin", type=float, default=None)
@@ -158,6 +179,8 @@ def main():
         cmd_info(args)
     elif args.subcommand == "benchmark":
         cmd_benchmark(args)
+    elif args.subcommand == "web":
+        cmd_web(args)
     else:
         parser.print_help()
 

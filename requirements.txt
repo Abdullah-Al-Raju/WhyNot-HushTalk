@@ -1,2 +1,4 @@
 scapy>=2.5.0
 colorama>=0.4.6
+fastapi>=0.100.0
+uvicorn>=0.20.0
