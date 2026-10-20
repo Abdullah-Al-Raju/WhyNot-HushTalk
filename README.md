@@ -35,6 +35,8 @@ The transmission protocol was verified over local loopback using a key-derived p
 
 ## Tactical Web Chat & Detection Dashboard
 
+![WhyNot-HushTalk Web Chat Dashboard](web-chat.png)
+
 WhyNot-HushTalk includes a built-in, local tactical web system providing full-duplex bidirectional covert timing chat paired with an interactive SOC defense inspector:
 
 ```bash

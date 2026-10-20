@@ -337,6 +337,7 @@ btnOpenConfig.addEventListener("click", () => {
   document.getElementById("cfg-target").value = s.target_ip || "127.0.0.1";
   document.getElementById("cfg-transport").value = s.transport || "udp";
   document.getElementById("cfg-port").value = s.port || 9999;
+  document.getElementById("cfg-listen-port").value = s.listen_port || s.port || 9999;
   document.getElementById("cfg-key").value = state.key || "";
   document.getElementById("cfg-profile").value = s.profile || "fast";
   document.getElementById("cfg-payload").value = s.payload_style || "pattern";
@@ -357,6 +358,7 @@ configForm.addEventListener("submit", async (e) => {
     target_ip: document.getElementById("cfg-target").value.trim(),
     transport: document.getElementById("cfg-transport").value,
     port: parseInt(document.getElementById("cfg-port").value, 10),
+    listen_port: parseInt(document.getElementById("cfg-listen-port").value, 10),
     key: document.getElementById("cfg-key").value.trim(),
     profile: document.getElementById("cfg-profile").value,
     payload_style: document.getElementById("cfg-payload").value,

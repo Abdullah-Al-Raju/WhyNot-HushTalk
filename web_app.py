@@ -83,6 +83,7 @@ class SendMessageRequest(BaseModel):
 class ConfigRequest(BaseModel):
     target_ip: Optional[str] = None
     port: Optional[int] = None
+    listen_port: Optional[int] = None
     key: Optional[str] = None
     profile: Optional[str] = None
     transport: Optional[str] = None
@@ -109,6 +110,7 @@ def update_config(req: ConfigRequest):
     updated = node.configure(
         target_ip=req.target_ip,
         port=req.port,
+        listen_port=req.listen_port,
         key=req.key,
         profile=req.profile,
         transport=req.transport,

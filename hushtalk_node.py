@@ -54,6 +54,7 @@ class HushTalkNode:
         self,
         target_ip: str = "127.0.0.1",
         port: int = 9999,
+        listen_port: Optional[int] = None,
         listen_ip: str = "0.0.0.0",
         key: Optional[str] = None,
         profile: str = "fast",
@@ -63,6 +64,7 @@ class HushTalkNode:
     ):
         self.target_ip = target_ip
         self.port = port
+        self.listen_port = listen_port or port
         self.listen_ip = listen_ip
         self.key = key
         self.profile = profile
@@ -105,6 +107,7 @@ class HushTalkNode:
         self,
         target_ip: Optional[str] = None,
         port: Optional[int] = None,
+        listen_port: Optional[int] = None,
         key: Optional[str] = None,
         profile: Optional[str] = None,
         transport: Optional[str] = None,
@@ -118,14 +121,18 @@ class HushTalkNode:
                 self.target_ip = target_ip
             if port is not None and port != self.port:
                 self.port = port
+            if listen_port is not None and listen_port != self.listen_port:
+                self.listen_port = listen_port
                 restart_listener = True
             if transport is not None and transport != self.transport:
                 self.transport = transport
                 restart_listener = True
-            if key is not None:
+            if key is not None and key != self.key:
                 self.key = key if key.strip() else None
-            if profile is not None and profile in hc.PROFILES:
+                restart_listener = True
+            if profile is not None and profile in hc.PROFILES and profile != self.profile:
                 self.profile = profile
+                restart_listener = True
             if payload_style is not None:
                 self.payload_style = payload_style
             if auto_ack is not None:
@@ -155,6 +162,7 @@ class HushTalkNode:
                 "running": self._running,
                 "target_ip": self.target_ip,
                 "port": self.port,
+                "listen_port": self.listen_port,
                 "transport": self.transport,
                 "profile": self.profile,
                 "has_key": bool(self.key),
@@ -287,9 +295,10 @@ class HushTalkNode:
 
         # Helper to send single packet
         def send_raw(seq: int):
+            now_sec = time.time()
+            now_ms = now_sec * 1000.0
             with self._lock:
-                self._own_sent_seqs.append(seq)
-            now_ms = time.time() * 1000.0
+                self._own_sent_seqs.append((seq, now_sec))
 
             if transport == "udp":
                 try:
@@ -370,9 +379,9 @@ class HushTalkNode:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            sock.bind((self.listen_ip, self.port))
+            sock.bind((self.listen_ip, self.listen_port))
         except Exception as exc:
-            self._emit({"type": "listener_error", "error": f"UDP bind failed on {self.listen_ip}:{self.port} - {exc}"})
+            self._emit({"type": "listener_error", "error": f"UDP bind failed on {self.listen_ip}:{self.listen_port} - {exc}"})
             return
 
         sock.settimeout(0.5)
@@ -397,9 +406,10 @@ class HushTalkNode:
                 if len(data) >= 4:
                     hdr_id, seq = struct.unpack("!HH", data[:4])
                     if hdr_id == self.session.icmp_id:
-                        # Echo cancellation for local transmissions
+                        # Echo cancellation for local transmissions (only if target and listen port match on loopback)
+                        now_sec = time.time()
                         with self._lock:
-                            if seq in self._own_sent_seqs:
+                            if self.port == self.listen_port and any(s == seq and (now_sec - t) < 0.15 for s, t in self._own_sent_seqs):
                                 continue
 
                         if last_packet_ts is not None:
@@ -449,8 +459,9 @@ class HushTalkNode:
                 return
 
             seq = icmp.seq
+            now_sec = time.time()
             with self._lock:
-                if seq in self._own_sent_seqs:
+                if any(s == seq and (now_sec - t) < 0.15 for s, t in self._own_sent_seqs):
                     return
 
             now_ms = time.time() * 1000.0
