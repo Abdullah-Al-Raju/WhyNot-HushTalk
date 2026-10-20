@@ -4,6 +4,8 @@
 import argparse
 import os
 import random
+import socket
+import struct
 import sys
 import time
 
@@ -55,7 +57,32 @@ def send_ping(dst, session, seq, ttl=None, iface=None, payload=None, is_ipv6=Fal
     return send(pkt, verbose=False)
 
 
-def wait_for_ack(session, target, seconds, quiet=False, is_ipv6=False):
+def send_udp_packet(sock, dst, port, session, seq, payload):
+    header = struct.pack("!HH", session.icmp_id, seq)
+    sock.sendto(header + payload, (dst, port))
+
+
+def wait_for_ack(session, target, seconds, quiet=False, is_ipv6=False, transport="icmp", port=9999, sock=None):
+    if transport == "udp":
+        if sock is None:
+            return False
+        got = 0
+        deadline = time.time() + seconds
+        while time.time() < deadline and got < 3:
+            remaining = max(0.1, deadline - time.time())
+            sock.settimeout(remaining)
+            try:
+                data, _ = sock.recvfrom(1024)
+                if len(data) >= 4:
+                    hdr_id, hdr_seq = struct.unpack("!HH", data[:4])
+                    if hdr_id == session.icmp_id and hdr_seq == session.ack_seq:
+                        got += 1
+            except (socket.timeout, BlockingIOError):
+                break
+            except Exception:
+                break
+        return got >= 3
+
     got = {"n": 0}
 
     def prn(pkt):
@@ -122,11 +149,14 @@ def main():
     parser.add_argument("--codebook", default="codebook.json", help="path to custom codebook JSON")
     parser.add_argument("--profile", choices=list(PROFILES.keys()), default="standard",
                         help="timing profile: standard (default), fast (LAN/lab), stealth (low rate)")
+    parser.add_argument("--transport", choices=["icmp", "udp"], default="icmp",
+                        help="transport mode: icmp (default, requires root/Npcap) or udp (unprivileged userland)")
+    parser.add_argument("--port", type=int, default=9999, help="target UDP port when using --transport udp")
     parser.add_argument("--key", default=None, help="shared secret; keys markers, delays and symbols")
     parser.add_argument("--payload", choices=["pattern", "windows", "linux", "random", "zero"],
                         default="pattern", help="cover ping payload style to evade static IDS signatures")
     parser.add_argument("--payload-len", type=int, default=48, help="payload byte length")
-    parser.add_argument("--ipv6", action="store_true", help="use IPv6 (ICMPv6 Echo Request)")
+    parser.add_argument("--ipv6", action="store_true", help="use IPv6")
     parser.add_argument("--iface", default=None, help="egress interface")
     parser.add_argument("--ttl", type=int, default=None, help="IP TTL or IPv6 Hop Limit")
     parser.add_argument("--jitter", type=float, default=None,
@@ -161,11 +191,11 @@ def main():
         print(f"{Fore.RED}[!] --to <target-ip> is required when not running with --simulate")
         sys.exit(1)
 
-    if not SCAPY_AVAILABLE:
-        print(f"{Fore.RED}[!] scapy is required for network transmission: pip install scapy")
-        sys.exit(1)
-
     is_ipv6 = args.ipv6 or (":" in args.to)
+
+    if args.transport == "icmp" and not SCAPY_AVAILABLE:
+        print(f"{Fore.RED}[!] scapy is required for ICMP network transmission: pip install scapy")
+        sys.exit(1)
 
     if profile_name != "standard":
         codebook = generate_codebook(profile_name)
@@ -188,11 +218,15 @@ def main():
     j = max(jitter, 0.0)
     quiet = args.quiet
 
+    udp_sock = None
+    if args.transport == "udp":
+        udp_sock = socket.socket(socket.AF_INET6 if is_ipv6 else socket.AF_INET, socket.SOCK_DGRAM)
+
     if not quiet:
         style = Fore.GREEN if args.key else Fore.CYAN
         what = f"keyed session ({profile_name})" if args.key else f"codebook session ({profile_name})"
-        proto_label = "IPv6/ICMPv6" if is_ipv6 else "IPv4/ICMP"
-        print(f"{style}[→] HushTalk {what} [{proto_label}]: icmp_id={session.icmp_id} "
+        proto_label = f"UDP:{args.port}" if args.transport == "udp" else ("IPv6/ICMPv6" if is_ipv6 else "IPv4/ICMP")
+        print(f"{style}[→] HushTalk {what} [{proto_label}]: id={session.icmp_id} "
               f"seq {session.start_seq}..{session.end_seq}")
         print(f"{Fore.CYAN}[→] Payload: {args.payload} ({len(payload_data)} bytes) | Jitter: ±{j:.1f}ms")
         print(f"{Fore.CYAN}[→] Sending: {prepared}")
@@ -200,12 +234,19 @@ def main():
             print(f"{Fore.YELLOW}[→] Delays (ms): {[round(d) for d in delays]}")
         print()
 
+    def do_send(seq):
+        if args.transport == "udp":
+            send_udp_packet(udp_sock, args.to, args.port, session, seq, payload_data)
+        else:
+            send_ping(args.to, session, seq, args.ttl, args.iface, payload_data, is_ipv6)
+
     try:
-        send_ping(args.to, session, session.start_seq, args.ttl, args.iface, payload_data, is_ipv6)
+        do_send(session.start_seq)
     except (PermissionError, Exception) as exc:
         print(f"{Fore.RED}[!] Packet transmission failed: {exc}")
-        print(f"{Fore.YELLOW}[!] Note: Raw ICMP sockets require root/admin privileges (e.g. sudo python3 whisper.py) or CAP_NET_RAW capability.")
-        print(f"{Fore.YELLOW}[!] You can also test without root using: python3 whisper.py --simulate -m \"...\"")
+        if args.transport == "icmp":
+            print(f"{Fore.YELLOW}[!] Note: Raw ICMP sockets require root privileges (sudo python3 whisper.py) or CAP_NET_RAW capability.")
+            print(f"{Fore.YELLOW}[!] Alternatively, run in userland mode without root using: --transport udp --port 9999")
         sys.exit(1)
 
     if args.verbose:
@@ -214,21 +255,24 @@ def main():
 
     for i, delay in enumerate(delays):
         seq = session.start_seq + 1 + i
-        send_ping(args.to, session, seq, args.ttl, args.iface, payload_data, is_ipv6)
+        do_send(seq)
         if args.verbose:
             print(f"{Fore.BLUE}    [{i + 1}/{len(delays)}] seq={seq} -> wait {delay:.0f}ms")
         time.sleep(max(delay + rng.uniform(-j, j), 1.0) / 1000.0)
 
-    send_ping(args.to, session, session.end_seq, args.ttl, args.iface, payload_data, is_ipv6)
+    do_send(session.end_seq)
     if args.verbose:
         print(f"{Fore.BLUE}    end marker seq={session.end_seq}")
     print(f"\n{Fore.GREEN}[✓] {len(prepared)} chars sent to {args.to}")
 
     if args.wait_ack > 0:
-        if wait_for_ack(session, args.to, args.wait_ack, quiet, is_ipv6):
+        if wait_for_ack(session, args.to, args.wait_ack, quiet, is_ipv6, args.transport, args.port, udp_sock):
             print(f"{Fore.GREEN}[✓] ack received from {args.to}")
         else:
             print(f"{Fore.YELLOW}[!] no ack after {args.wait_ack:.0f}s (receiver offline or --ack not set)")
+
+    if udp_sock:
+        udp_sock.close()
 
 
 if __name__ == "__main__":
