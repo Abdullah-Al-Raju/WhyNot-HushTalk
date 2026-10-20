@@ -10,6 +10,18 @@
 
 ---
 
+## 📸 Live Verification & Screenshots
+
+Live loopback transmission and decode verification ([Full Verification Report](VERIFICATION_REPORT.md)):
+
+### Sender (`whisper.py`)
+![HushTalk Sender](sender.png)
+
+### Receiver (`listen.py`)
+![HushTalk Receiver](hushtalk-listener.png)
+
+---
+
 ## 🎯 How It Works
 
 Each symbol is carried by the **time between two packets**, not by packet contents. Packets look like ordinary pings; the message lives in the gaps.
@@ -32,6 +44,7 @@ The last symbol is carried by the interval between the final data ping and the e
 - ⚡ **Timing Profiles**: Choose `--profile fast` for high-throughput LANs (~2.5 chars/s), `standard` for realistic WAN delays, or `stealth` for low-frequency exfiltration.
 - 🛡️ **Realistic Cover Payloads**: Defeat static IDS signatures by mimicking Windows `ping.exe`, Linux `iputils`, pseudo-random bytes, or zero-byte payloads (`--payload windows|linux|random|zero`).
 - 🌐 **IPv6 & IPv4**: Native support for both IPv4 ICMP and IPv6 ICMPv6 (`--ipv6` or auto-detected).
+- 🚀 **Unprivileged UDP Mode**: Optional `--transport udp --port 9999` mode to run timing channels in userland without root/sudo or Npcap.
 - 📊 **Telemetry & SIEM Output**: Live jitter tracking, throughput calculation (chars/sec), and `--json` streaming events for SOC/SIEM pipeline integration.
 - 🔄 **Unified CLI**: Run via `python3 hushtalk.py {whisper,listen,demo,info,benchmark}` or standalone scripts `whisper.py` and `listen.py`.
 
@@ -63,19 +76,23 @@ python3 whisper.py --simulate -m "SUPER SECRET" --key "my-passphrase"
 
 ### 3. Live Network Usage
 
-> **Note on Permissions:** Linux/macOS raw sockets require `sudo` or `CAP_NET_RAW`. **Windows needs [Npcap](https://npcap.com/)** installed.
+> **Note on Permissions:** Raw ICMP sockets on Linux/macOS require `sudo` or `CAP_NET_RAW` (Windows needs [Npcap](https://npcap.com/)). Alternatively, run in userland without root using `--transport udp`.
 
 **Terminal 1 — listen:**
 ```bash
-sudo python3 listen.py                           # standard mode
+sudo python3 listen.py                           # standard ICMP mode
 sudo python3 listen.py --profile fast            # fast LAN mode
 sudo python3 listen.py --key SECRET --profile fast --ack # keyed + fast mode
+# Or without root using UDP userland transport:
+python3 listen.py --transport udp --port 9999 --profile fast --key SECRET --ack
 ```
 
 **Terminal 2 — send:**
 ```bash
 python3 whisper.py --to 127.0.0.1 -m "HELLO"
 python3 whisper.py --to 192.168.1.100 -m "SECRET" --profile fast --key SECRET --wait-ack 30
+# Or without root using UDP userland transport:
+python3 whisper.py --to 127.0.0.1 -m "SECRET" --profile fast --key SECRET --transport udp --port 9999 --wait-ack 10
 ```
 
 **IPv6 Transmission:**
@@ -105,6 +122,8 @@ python3 hushtalk.py listen [listen flags...]
 | `-m` / `--file` | Message text (`-` reads stdin) or file path |
 | `--key` | Shared secret key (keys markers, delays, and symbols) |
 | `--profile` | `standard` (default), `fast` (LAN / lab), `stealth` (low rate) |
+| `--transport` | `icmp` (default, raw sockets) or `udp` (unprivileged userland) |
+| `--port` | Target UDP port when using `--transport udp` (default: 9999) |
 | `--payload` | Cover payload style: `pattern`, `windows`, `linux`, `random`, `zero` |
 | `--payload-len` | Payload byte length (default: 48) |
 | `--ipv6` | Force IPv6 ICMPv6 Echo Request |
@@ -120,6 +139,8 @@ python3 hushtalk.py listen [listen flags...]
 |---|---|
 | `--iface` | Capture interface (default: all) |
 | `--src IP` | Only accept pings from this source IP |
+| `--transport` | `icmp` (default, raw sockets) or `udp` (unprivileged userland) |
+| `--port` | Listen UDP port when using `--transport udp` (default: 9999) |
 | `--key` | Shared secret key (must match sender) |
 | `--profile` | `standard` (default), `fast`, `stealth` |
 | `--margin` | Max ms deviation accepted when snapping delay (default: auto from profile) |
@@ -182,19 +203,22 @@ Calling timing channels "undetectable" is marketing. What SOC detection **can** 
 
 ```
 WhyNot-HushTalk/
-├── hushtalk_core.py      # Core protocol FSM, timing profiles, crypto derivation, simulation
-├── hushtalk.py           # Unified CLI suite (info, demo, benchmark, whisper, listen)
-├── whisper.py            # Sender CLI (Scapy / raw ICMP)
-├── listen.py             # Receiver CLI (Scapy / packet sniffer)
+├── hushtalk_core.py       # Core protocol FSM, timing profiles, crypto derivation, simulation
+├── hushtalk.py            # Unified CLI suite (info, demo, benchmark, whisper, listen)
+├── whisper.py             # Sender CLI (Scapy ICMP & unprivileged UDP)
+├── listen.py              # Receiver CLI (Scapy packet sniffer & UDP)
+├── VERIFICATION_REPORT.md # Live loopback transmission & verification report
+├── sender.png             # Sender terminal screenshot
+├── hushtalk-listener.png  # Receiver terminal screenshot
 ├── codebooks/
-│   └── codebook.json     # Standard delay lookup table
+│   └── codebook.json      # Standard delay lookup table
 ├── tests/
-│   ├── test_protocol.py  # Protocol simulation and loss resync tests
-│   └── test_upgrades.py  # Timing profiles, payloads, IPv6, telemetry tests
-├── pyproject.toml        # PEP 621 packaging and project metadata
-├── requirements.txt      # Runtime dependencies (scapy, colorama)
+│   ├── test_protocol.py   # Protocol simulation and loss resync tests
+│   └── test_upgrades.py   # Timing profiles, payloads, IPv6, telemetry tests
+├── pyproject.toml         # PEP 621 packaging and project metadata
+├── requirements.txt       # Runtime dependencies (scapy, colorama)
 └── .github/workflows/
-    └── ci.yml            # Multi-OS automated testing matrix
+    └── ci.yml             # Multi-OS automated testing matrix
 ```
 
 ---
