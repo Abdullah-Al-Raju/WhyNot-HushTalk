@@ -2,13 +2,24 @@
 """WhyNot-HushTalk sender: encodes a message as inter-ping delays."""
 
 import argparse
+import os
 import random
 import sys
 import time
 
 from colorama import Fore, Style, init
 
-from hushtalk_core import MAX_MESSAGE_LEN, PAD_PAYLOAD, Session, encode_delays, load_codebook
+from hushtalk_core import (
+    MAX_MESSAGE_LEN,
+    PAD_PAYLOAD,
+    PROFILES,
+    Session,
+    encode_delays,
+    generate_codebook,
+    generate_payload,
+    load_codebook,
+    simulate_run,
+)
 
 init(autoreset=True)
 
@@ -16,64 +27,121 @@ try:
     from scapy.all import ICMP, IP, Raw, conf, send, sniff
 
     conf.verb = 0
+    SCAPY_AVAILABLE = True
 except ImportError:  # pragma: no cover
-    print("scapy is required: pip install scapy")
-    sys.exit(1)
+    SCAPY_AVAILABLE = False
 
 
-def build_ping(dst, session, seq, ttl=None):
-    ip = IP(dst=dst)
-    if ttl:
-        ip.ttl = ttl
-    return ip / ICMP(type=8, id=session.icmp_id, seq=seq) / Raw(load=PAD_PAYLOAD)
+def build_ping(dst, session, seq, ttl=None, payload=None, is_ipv6=False):
+    load = payload if payload is not None else PAD_PAYLOAD
+    if is_ipv6:
+        from scapy.layers.inet6 import IPv6, ICMPv6EchoRequest
+
+        ip = IPv6(dst=dst)
+        if ttl:
+            ip.hlim = ttl
+        return ip / ICMPv6EchoRequest(id=session.icmp_id, seq=seq, data=load)
+    else:
+        ip = IP(dst=dst)
+        if ttl:
+            ip.ttl = ttl
+        return ip / ICMP(type=8, id=session.icmp_id, seq=seq) / Raw(load=load)
 
 
-def send_ping(dst, session, seq, ttl=None, iface=None):
-    pkt = build_ping(dst, session, seq, ttl)
+def send_ping(dst, session, seq, ttl=None, iface=None, payload=None, is_ipv6=False):
+    pkt = build_ping(dst, session, seq, ttl, payload, is_ipv6)
     if iface:
         return send(pkt, iface=iface, verbose=False)
     return send(pkt, verbose=False)
 
 
-def wait_for_ack(session, target, seconds, quiet):
+def wait_for_ack(session, target, seconds, quiet=False, is_ipv6=False):
     got = {"n": 0}
 
     def prn(pkt):
-        if ICMP in pkt and pkt[ICMP].id == session.icmp_id and pkt[ICMP].seq == session.ack_seq:
-            got["n"] += 1
+        if is_ipv6:
+            from scapy.layers.inet6 import ICMPv6EchoRequest
+
+            if ICMPv6EchoRequest in pkt:
+                icmp = pkt[ICMPv6EchoRequest]
+                if icmp.id == session.icmp_id and icmp.seq == session.ack_seq:
+                    got["n"] += 1
+        else:
+            if ICMP in pkt and pkt[ICMP].id == session.icmp_id and pkt[ICMP].seq == session.ack_seq:
+                got["n"] += 1
 
     def stop(pkt):
         return got["n"] >= 3
 
+    bpf = f"icmp6 and src {target}" if is_ipv6 else f"icmp and src {target}"
     try:
-        sniff(filter=f"icmp and src {target}", prn=prn, stop_filter=stop, timeout=seconds)
-    except Exception as exc:  # BPF quirks on some platforms
+        sniff(filter=bpf, prn=prn, stop_filter=stop, timeout=seconds)
+    except Exception as exc:
         if not quiet:
             print(f"{Fore.YELLOW}[!] ack sniff failed: {exc}")
         return False
     return got["n"] >= 3
 
 
+def run_simulation_mode(text, key, profile_name, jitter, payload_style):
+    print(f"{Fore.MAGENTA}{Style.BRIGHT}[🧪] Running HushTalk in Simulation Mode (No root/network required)")
+    sim = simulate_run(
+        message=text,
+        key=key,
+        profile=profile_name,
+        jitter=jitter,
+        payload_style=payload_style,
+    )
+    sess_info = sim["session"]
+    stats = sim["stats"]
+    print(f"{Fore.CYAN}    Session: profile={sess_info['profile']} | icmp_id={sess_info['icmp_id']} | "
+          f"seq {sess_info['start_seq']}..{sess_info['end_seq']}")
+    print(f"{Fore.CYAN}    Cover Payload: style={sess_info['payload_style']} ({sess_info['payload_len']} bytes)")
+    print(f"{Fore.CYAN}    Simulated Jitter: ±{sess_info['jitter_simulated_ms']:.1f}ms")
+    print(f"{Fore.GREEN}[→] Input:    {sim['prepared']}")
+    print(f"{Fore.GREEN}[✓] Decoded:  {sim['received']!r}")
+    if stats:
+        uncertain = stats.get("uncertain", 0)
+        total = stats.get("symbols", len(sim["prepared"]))
+        elapsed_s = stats.get("elapsed_ms", 0.0) / 1000.0
+        cps = stats.get("cps", 0.0)
+        avg_j = stats.get("avg_jitter_ms", 0.0)
+        max_j = stats.get("max_jitter_ms", 0.0)
+        status_color = Fore.GREEN if uncertain == 0 else Fore.YELLOW
+        print(f"{status_color}    Stats:    {total - uncertain}/{total} symbols clean | "
+              f"duration={elapsed_s:.1f}s ({cps:.2f} chars/s) | jitter avg={avg_j:.1f}ms max={max_j:.1f}ms")
+    print(f"{Fore.MAGENTA}[✓] Simulation complete.\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description="HushTalk sender: hide messages in ping timing")
-    parser.add_argument("--to", required=True, help="target IPv4")
+    parser.add_argument("--to", default=None, help="target IPv4 or IPv6 address")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("-m", "--message", help="message text (use - to read stdin)")
     group.add_argument("--file", help="read message from file")
-    parser.add_argument("--codebook", default="codebook.json")
+    parser.add_argument("--codebook", default="codebook.json", help="path to custom codebook JSON")
+    parser.add_argument("--profile", choices=list(PROFILES.keys()), default="standard",
+                        help="timing profile: standard (default), fast (LAN/lab), stealth (low rate)")
     parser.add_argument("--key", default=None, help="shared secret; keys markers, delays and symbols")
+    parser.add_argument("--payload", choices=["pattern", "windows", "linux", "random", "zero"],
+                        default="pattern", help="cover ping payload style to evade static IDS signatures")
+    parser.add_argument("--payload-len", type=int, default=48, help="payload byte length")
+    parser.add_argument("--ipv6", action="store_true", help="use IPv6 (ICMPv6 Echo Request)")
     parser.add_argument("--iface", default=None, help="egress interface")
-    parser.add_argument("--ttl", type=int, default=None)
-    parser.add_argument("--jitter", type=float, default=30.0, help="± ms randomness on each delay (0 disables)")
+    parser.add_argument("--ttl", type=int, default=None, help="IP TTL or IPv6 Hop Limit")
+    parser.add_argument("--jitter", type=float, default=None,
+                        help="± ms randomness on each delay (default: from profile)")
     parser.add_argument("--gap", type=float, default=500.0, help="ms between start marker and first data ping")
     parser.add_argument("--wait-ack", type=float, default=0.0, metavar="SEC", help="wait for receiver ack burst")
+    parser.add_argument("--simulate", "--dry-run", action="store_true",
+                        help="dry-run simulation without sending packets or requiring root")
     parser.add_argument("-q", "--quiet", action="store_true")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
     text = args.message
     if args.file:
-        with open(args.file) as f:
+        with open(args.file, "r", encoding="utf-8") as f:
             text = f.read()
     elif text == "-":
         text = sys.stdin.read()
@@ -81,47 +149,83 @@ def main():
         print(f"{Fore.RED}[!] empty message")
         sys.exit(1)
 
-    codebook = load_codebook(args.codebook)
-    session = Session(args.key)
+    profile_name = args.profile
+    prof = PROFILES[profile_name]
+    jitter = args.jitter if args.jitter is not None else prof.default_jitter
+
+    if args.simulate:
+        run_simulation_mode(text, args.key, profile_name, jitter, args.payload)
+        return
+
+    if not args.to:
+        print(f"{Fore.RED}[!] --to <target-ip> is required when not running with --simulate")
+        sys.exit(1)
+
+    if not SCAPY_AVAILABLE:
+        print(f"{Fore.RED}[!] scapy is required for network transmission: pip install scapy")
+        sys.exit(1)
+
+    is_ipv6 = args.ipv6 or (":" in args.to)
+
+    if profile_name != "standard":
+        codebook = generate_codebook(profile_name)
+    else:
+        try:
+            codebook = load_codebook(args.codebook)
+        except FileNotFoundError as err:
+            print(f"{Fore.YELLOW}[!] Codebook file '{args.codebook}' not found, falling back to standard profile generator: {err}")
+            codebook = generate_codebook("standard")
+
+    session = Session(args.key, profile=profile_name)
     try:
         delays, prepared = encode_delays(text, session, codebook)
     except ValueError as exc:
         print(f"{Fore.RED}[!] {exc}")
         sys.exit(1)
 
+    payload_data = generate_payload(args.payload, args.payload_len)
     rng = random.Random()
-    j = max(args.jitter, 0.0)
+    j = max(jitter, 0.0)
     quiet = args.quiet
 
     if not quiet:
         style = Fore.GREEN if args.key else Fore.CYAN
-        what = "keyed session" if args.key else "codebook session"
-        print(f"{style}[→] HushTalk {what}: icmp_id={session.icmp_id} "
+        what = f"keyed session ({profile_name})" if args.key else f"codebook session ({profile_name})"
+        proto_label = "IPv6/ICMPv6" if is_ipv6 else "IPv4/ICMP"
+        print(f"{style}[→] HushTalk {what} [{proto_label}]: icmp_id={session.icmp_id} "
               f"seq {session.start_seq}..{session.end_seq}")
+        print(f"{Fore.CYAN}[→] Payload: {args.payload} ({len(payload_data)} bytes) | Jitter: ±{j:.1f}ms")
         print(f"{Fore.CYAN}[→] Sending: {prepared}")
         if args.verbose:
             print(f"{Fore.YELLOW}[→] Delays (ms): {[round(d) for d in delays]}")
         print()
 
-    send_ping(args.to, session, session.start_seq, args.ttl, args.iface)
+    try:
+        send_ping(args.to, session, session.start_seq, args.ttl, args.iface, payload_data, is_ipv6)
+    except (PermissionError, Exception) as exc:
+        print(f"{Fore.RED}[!] Packet transmission failed: {exc}")
+        print(f"{Fore.YELLOW}[!] Note: Raw ICMP sockets require root/admin privileges (e.g. sudo python3 whisper.py) or CAP_NET_RAW capability.")
+        print(f"{Fore.YELLOW}[!] You can also test without root using: python3 whisper.py --simulate -m \"...\"")
+        sys.exit(1)
+
     if args.verbose:
         print(f"{Fore.BLUE}    start marker seq={session.start_seq}")
     time.sleep(max(args.gap + rng.uniform(-j, j), 50.0) / 1000.0)
 
     for i, delay in enumerate(delays):
         seq = session.start_seq + 1 + i
-        send_ping(args.to, session, seq, args.ttl, args.iface)
+        send_ping(args.to, session, seq, args.ttl, args.iface, payload_data, is_ipv6)
         if args.verbose:
             print(f"{Fore.BLUE}    [{i + 1}/{len(delays)}] seq={seq} -> wait {delay:.0f}ms")
         time.sleep(max(delay + rng.uniform(-j, j), 1.0) / 1000.0)
 
-    send_ping(args.to, session, session.end_seq, args.ttl, args.iface)
+    send_ping(args.to, session, session.end_seq, args.ttl, args.iface, payload_data, is_ipv6)
     if args.verbose:
         print(f"{Fore.BLUE}    end marker seq={session.end_seq}")
     print(f"\n{Fore.GREEN}[✓] {len(prepared)} chars sent to {args.to}")
 
     if args.wait_ack > 0:
-        if wait_for_ack(session, args.to, args.wait_ack, quiet):
+        if wait_for_ack(session, args.to, args.wait_ack, quiet, is_ipv6):
             print(f"{Fore.GREEN}[✓] ack received from {args.to}")
         else:
             print(f"{Fore.YELLOW}[!] no ack after {args.wait_ack:.0f}s (receiver offline or --ack not set)")

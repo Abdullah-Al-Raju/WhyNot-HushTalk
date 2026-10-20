@@ -2,12 +2,19 @@
 """WhyNot-HushTalk receiver: listens for ICMP timing patterns and decodes them."""
 
 import argparse
+import json
 import sys
 import time
 
 from colorama import Fore, Style, init
 
-from hushtalk_core import Receiver, Session, load_codebook
+from hushtalk_core import (
+    PROFILES,
+    Receiver,
+    Session,
+    generate_codebook,
+    load_codebook,
+)
 
 init(autoreset=True)
 
@@ -15,14 +22,19 @@ try:
     from scapy.all import ICMP, IP, Raw, conf, send, sniff
 
     conf.verb = 0
+    SCAPY_AVAILABLE = True
 except ImportError:  # pragma: no cover
-    print("scapy is required: pip install scapy")
-    sys.exit(1)
+    SCAPY_AVAILABLE = False
 
 
-def send_ack(target, session, iface=None):
+def send_ack(target, session, iface=None, is_ipv6=False):
     for _ in range(3):
-        pkt = IP(dst=target) / ICMP(type=8, id=session.icmp_id, seq=session.ack_seq) / Raw(load=b"\x00" * 16)
+        if is_ipv6:
+            from scapy.layers.inet6 import IPv6, ICMPv6EchoRequest
+
+            pkt = IPv6(dst=target) / ICMPv6EchoRequest(id=session.icmp_id, seq=session.ack_seq, data=b"\x00" * 16)
+        else:
+            pkt = IP(dst=target) / ICMP(type=8, id=session.icmp_id, seq=session.ack_seq) / Raw(load=b"\x00" * 16)
         if iface:
             send(pkt, iface=iface, verbose=False)
         else:
@@ -30,24 +42,40 @@ def send_ack(target, session, iface=None):
         time.sleep(0.05)
 
 
-def make_handler(session, codebook, args):
+def make_handler(session, codebook, args, is_ipv6=False):
     state = {"sender": None}
 
     def on_event(ev, data):
+        if args.json:
+            event_obj = {"event": ev, "timestamp": time.time(), "data": data}
+            print(json.dumps(event_obj))
+            sys.stdout.flush()
+            if ev == "message" and args.ack and state["sender"]:
+                send_ack(state["sender"], session, args.iface, is_ipv6)
+            return
+
         if ev == "start":
             print(f"{Fore.YELLOW}[🎯] message started")
         elif ev == "message":
-            msg, uncertain, total = data["message"], data["uncertain"], data["symbols"]
+            msg = data.get("message", "")
+            uncertain = data.get("uncertain", 0)
+            total = data.get("symbols", 0)
+            elapsed_s = data.get("elapsed_ms", 0.0) / 1000.0
+            cps = data.get("cps", 0.0)
+            avg_j = data.get("avg_jitter_ms", 0.0)
+            max_j = data.get("max_jitter_ms", 0.0)
+
             color = Fore.GREEN if uncertain == 0 else Fore.YELLOW
-            print(f"{color}{Style.BRIGHT}{'=' * 50}")
+            print(f"{color}{Style.BRIGHT}{'=' * 56}")
             print(f"[📨] DECODED: {msg!r}")
             if uncertain:
                 print(f"{color}[!] {uncertain}/{total} symbols uncertain")
             else:
                 print(f"{color}[✓] clean decode, {total} symbols")
-            print(f"{Style.BRIGHT}{'=' * 50}\n")
+            print(f"{Fore.CYAN}[📊] Duration: {elapsed_s:.1f}s ({cps:.2f} chars/s) | Jitter avg: {avg_j:.1f}ms max: {max_j:.1f}ms")
+            print(f"{Style.BRIGHT}{'=' * 56}\n")
             if args.ack and state["sender"]:
-                send_ack(state["sender"], session, args.iface)
+                send_ack(state["sender"], session, args.iface, is_ipv6)
                 print(f"{Fore.GREEN}[→] ack sent to {state['sender']}")
         elif ev == "timeout":
             partial = data.get("partial", "")
@@ -57,63 +85,113 @@ def make_handler(session, codebook, args):
     receiver = Receiver(
         session,
         codebook,
-        margin=args.margin,
+        margin=args.margin if args.margin is not None else session.profile.margin,
         timeout_ms=args.timeout * 1000.0 if args.timeout else None,
         on_event=on_event,
     )
 
     def handler(pkt):
-        if IP not in pkt or ICMP not in pkt:
-            return
-        icmp = pkt[ICMP]
-        if icmp.type != 8 or icmp.id != session.icmp_id:
-            return
-        if args.src and pkt[IP].src != args.src:
-            return
-        state["sender"] = pkt[IP].src
-        now = time.time() * 1000.0
-        if args.verbose:
-            print(f"{Fore.CYAN}    seq={icmp.seq} from {pkt[IP].src}")
-        receiver.on_packet(now, icmp.seq)
+        if is_ipv6:
+            from scapy.layers.inet6 import IPv6, ICMPv6EchoRequest
 
-    return handler
+            if IPv6 not in pkt or ICMPv6EchoRequest not in pkt:
+                return
+            icmp = pkt[ICMPv6EchoRequest]
+            if icmp.id != session.icmp_id:
+                return
+            src = pkt[IPv6].src
+            seq = icmp.seq
+        else:
+            if IP not in pkt or ICMP not in pkt:
+                return
+            icmp = pkt[ICMP]
+            if icmp.type != 8 or icmp.id != session.icmp_id:
+                return
+            src = pkt[IP].src
+            seq = icmp.seq
+
+        if args.src and src != args.src:
+            return
+        state["sender"] = src
+        now = time.time() * 1000.0
+        if args.verbose and not args.json:
+            print(f"{Fore.CYAN}    seq={seq} from {src}")
+        receiver.on_packet(now, seq)
+
+    return handler, receiver
 
 
 def main():
     parser = argparse.ArgumentParser(description="HushTalk receiver: decode hidden messages from ping timing")
     parser.add_argument("--iface", default=None, help="interface to listen on (default: all)")
     parser.add_argument("--src", default=None, help="only accept pings from this IP")
-    parser.add_argument("--codebook", default="codebook.json")
+    parser.add_argument("--codebook", default="codebook.json", help="path to custom codebook JSON")
+    parser.add_argument("--profile", choices=list(PROFILES.keys()), default="standard",
+                        help="timing profile: standard (default), fast (LAN/lab), stealth (low rate)")
     parser.add_argument("--key", default=None, help="shared secret (must match sender)")
-    parser.add_argument("--margin", type=float, default=45.0, help="max ms deviation from expected delay")
+    parser.add_argument("--margin", type=float, default=None,
+                        help="max ms deviation from expected delay (default: auto from profile)")
     parser.add_argument("--timeout", type=float, default=None,
-                        help="seconds of silence before abandoning a message (default: derived from session delays)")
+                        help="seconds of silence before abandoning a message (default: auto from delays)")
     parser.add_argument("--ack", action="store_true", help="reply with an ack burst after each decode")
+    parser.add_argument("--ipv6", action="store_true", help="listen for IPv6 ICMPv6 Echo Requests")
+    parser.add_argument("--json", action="store_true", help="emit machine-readable JSON events")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
-    codebook = load_codebook(args.codebook)
-    session = Session(args.key)
-    handler = make_handler(session, codebook, args)
+    if not SCAPY_AVAILABLE:
+        print(f"{Fore.RED}[!] scapy is required: pip install scapy")
+        sys.exit(1)
 
-    what = "keyed" if args.key else "codebook"
-    print(f"{Fore.CYAN}{Style.BRIGHT}[👂] HushTalk listening ({what} session)")
-    print(f"{Fore.YELLOW}      icmp_id={session.icmp_id} "
-          f"seq {session.start_seq}..{session.end_seq} margin=±{args.margin:.0f}ms")
-    if args.iface is None:
-        print(f"{Fore.YELLOW}      all interfaces (use --iface to narrow)")
-    print(f"{Fore.CYAN}[👂] Send from another shell: "
-          f"python whisper.py --to <this-ip> -m \"HELLO\""
-          + (f" --key <secret>" if args.key else "") + "\n")
+    profile_name = args.profile
+    if profile_name != "standard":
+        codebook = generate_codebook(profile_name)
+    else:
+        try:
+            codebook = load_codebook(args.codebook)
+        except FileNotFoundError as err:
+            if not args.json:
+                print(f"{Fore.YELLOW}[!] Codebook '{args.codebook}' not found, using standard profile: {err}")
+            codebook = generate_codebook("standard")
 
-    bpf = "icmp"
+    session = Session(args.key, profile=profile_name)
+    handler, receiver = make_handler(session, codebook, args, is_ipv6=args.ipv6)
+
+    eff_margin = args.margin if args.margin is not None else session.profile.margin
+
+    if not args.json:
+        what = "keyed" if args.key else "codebook"
+        proto_label = "IPv6/ICMPv6" if args.ipv6 else "IPv4/ICMP"
+        print(f"{Fore.CYAN}{Style.BRIGHT}[👂] HushTalk listening ({what} session, profile={profile_name}) [{proto_label}]")
+        print(f"{Fore.YELLOW}      icmp_id={session.icmp_id} "
+              f"seq {session.start_seq}..{session.end_seq} margin=±{eff_margin:.0f}ms")
+        if args.iface is None:
+            print(f"{Fore.YELLOW}      all interfaces (use --iface to narrow)")
+        print(f"{Fore.CYAN}[👂] Send from another shell: "
+              f"python whisper.py --to <this-ip> -m \"HELLO\" --profile {profile_name}"
+              + (f" --key <secret>" if args.key else "")
+              + (" --ipv6" if args.ipv6 else "") + "\n")
+
+    bpf = "icmp6" if args.ipv6 else "icmp"
     if args.src:
         bpf += f" and src {args.src}"
 
     try:
-        sniff(iface=args.iface, prn=handler, store=0, filter=bpf)
-    except KeyboardInterrupt:
-        print(f"\n{Fore.RED}[👂] stopped.")
+        # Sniff loop with periodic timeout so receiver.tick() fires timeout events
+        while True:
+            sniff(iface=args.iface, prn=handler, store=0, filter=bpf, timeout=1.0)
+            receiver.tick(time.time() * 1000.0)
+    except (PermissionError, Exception) as exc:
+        if isinstance(exc, KeyboardInterrupt):
+            if not args.json:
+                print(f"\n{Fore.RED}[👂] stopped.")
+        else:
+            if not args.json:
+                print(f"{Fore.RED}[!] Sniffer failed: {exc}")
+                print(f"{Fore.YELLOW}[!] Note: Sniffing raw ICMP packets requires root privileges (sudo python3 listen.py) or CAP_NET_RAW capability.")
+            else:
+                print(json.dumps({"error": str(exc)}))
+            sys.exit(1)
 
 
 if __name__ == "__main__":
